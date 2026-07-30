@@ -7,7 +7,6 @@ from botocore.config import Config
 
 # Supported Claude model IDs on Amazon Bedrock
 SUPPORTED_MODELS = {
-    # TODO: Needs some tweaking to use
     "claude-fable-5"    : "us.anthropic.claude-fable-5",
     "claude-opus-5"     : "us.anthropic.claude-opus-5",
     "claude-sonnet-5"   : "us.anthropic.claude-sonnet-5",
@@ -69,8 +68,19 @@ class BedrockLLM:
             config=Config(connect_timeout=300, read_timeout=300)
         )
 
+    def _is_restricted_sampling_model(self):
+        """Check if the model has restricted sampling parameters.
+
+        Claude 5 requires:
+          - temperature must be 1.0 or unset
+          - top_p must be >= 0.99 or unset
+          - top_k is NOT supported
+        """
+        restricted_ids = ["claude-sonnet-5", "claude-opus-5", "claude-fable-5"]
+        return any(rid in self.model_id for rid in restricted_ids)
+
     def _get_response(self, prompt_text):
-        body = json.dumps({
+        payload = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": self.max_tokens,
             "messages": [
@@ -79,9 +89,16 @@ class BedrockLLM:
                     "content": [{"type": "text", "text": prompt_text}]
                 }
             ],
-            "temperature": self.temperature,
-            "top_k": self.top_k
-        })
+        }
+
+        if self._is_restricted_sampling_model():
+            pass
+        else:
+            # Standard models support temperature and top_k freely
+            payload["temperature"] = self.temperature
+            payload["top_k"] = self.top_k
+
+        body = json.dumps(payload)
         response = self.bedrock_runtime_client.invoke_model(
             modelId=self.model_id,
             accept='application/json',
@@ -127,7 +144,12 @@ class BedrockLLM:
 
     def call_llm_on_prompt(self, prompt):
         response = self._get_response_with_backoff(prompt)
-        return response["content"][0]["text"]
+        # Claude 5 models have adaptive thinking always on, so the response
+        # content may contain "thinking" blocks before the "text" block.
+        for block in response["content"]:
+            if block["type"] == "text":
+                return block["text"]
+        raise ValueError("LLM response object could not be parsed")
 
     def call_llm_on_prompt_list(self, prompt_list):
         results = [None] * len(prompt_list)
