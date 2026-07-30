@@ -5,21 +5,62 @@ import json
 from botocore.config import Config
 
 
+# Supported Claude model IDs on Amazon Bedrock
+SUPPORTED_MODELS = {
+    # TODO: Needs some tweaking to use
+    "claude-fable-5"    : "us.anthropic.claude-fable-5",
+    "claude-opus-5"     : "us.anthropic.claude-opus-5",
+    "claude-sonnet-5"   : "us.anthropic.claude-sonnet-5",
+
+    "claude-opus-4.6"   : "us.anthropic.claude-opus-4-6-v1",
+    "claude-sonnet-4.6" : "us.anthropic.claude-sonnet-4-6",
+
+    "claude-opus-4.5"   : "us.anthropic.claude-opus-4-5-20251101-v1:0",
+    "claude-sonnet-4.5" : "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "claude-haiku-4.5"  : "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+}
+
+
 class BedrockLLM:
 
 
-    def __init__(self, model_id='us.anthropic.claude-sonnet-4-5-20250929-v1:0', 
+    def __init__(self, model='claude-sonnet-4.5', 
                  temperature=0.0, max_tokens=10000,
                  top_k=100, top_p=0.9,
                  num_retries = 10, max_workers = 50):
         self.bedrock_runtime_client = self._get_client()
-        self.model_id = model_id
+        self.model_id = self._resolve_model_id(model)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.top_k = top_k
         self.top_p = top_p
         self.num_retries = num_retries
         self.max_workers = max_workers
+
+    @staticmethod
+    def _resolve_model_id(model):
+        """Resolve a model name to its Bedrock model ID.
+        
+        Accepts either a friendly name (e.g. 'claude-4-haiku', 'claude-4.5-opus')
+        or a full Bedrock model ID string.
+        """
+        if model in SUPPORTED_MODELS:
+            return SUPPORTED_MODELS[model]
+        # Allow passing a raw model ID directly for flexibility
+        if model.startswith("us.anthropic.") or model.startswith("anthropic."):
+            return model
+        available = ", ".join(sorted(SUPPORTED_MODELS.keys()))
+        raise ValueError(
+            f"Unknown model '{model}'. "
+            f"Choose from: {available}, or pass a full Bedrock model ID."
+        )
+
+    @staticmethod
+    def list_models():
+        """Print all supported model names and their Bedrock model IDs."""
+        print("Supported models:")
+        for name, model_id in SUPPORTED_MODELS.items():
+            print(f"  {name:20s} -> {model_id}")
 
     def _get_client(self):
         session = boto3.session.Session(region_name='us-east-1')
@@ -53,9 +94,36 @@ class BedrockLLM:
         for i in range(self.num_retries):
             try:
                 return self._get_response(prompt)
-            except Exception:
+            except Exception as exception:
+                print(exception, f"Retrying in {2 ** (i + 1)} seconds")
                 time.sleep(2 ** (i + 1))
         raise ValueError("LLM retries exhausted. Try increasing number of retries.")
+
+    def get_model_version(self):
+        """Query the model and return the version reported in the API response.
+        
+        This sends a minimal prompt and reads the 'model' field from the 
+        response body, which is the actual model that processed the request
+        (independent of the model_id used in the request).
+        """
+        body = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 1,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hi"}]
+                }
+            ],
+        })
+        response = self.bedrock_runtime_client.invoke_model(
+            modelId=self.model_id,
+            accept='application/json',
+            contentType='application/json',
+            body=body
+        )
+        response_body = json.loads(response.get('body').read())
+        return response_body.get("model")
 
     def call_llm_on_prompt(self, prompt):
         response = self._get_response_with_backoff(prompt)
